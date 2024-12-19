@@ -6,10 +6,17 @@
 
 ## 配置
 
+创建conda环境
+```
+conda create -n human-detection python=3.8
+conda activate human-detection
+```
+安装依赖
+```
 conda install pytorch torchvision pytorch-cuda -c pytorch -c nvidia
-
-pip install opencv-python pyrealsense2 deep-sort-realtime ultralytics
-
-pip install ultralytics shapely lap
+pip install ultralytics shapely lap onnx>=1.12.0 onnxslim onnxruntime
+pip install opencv-python pyrealsense2
+pip install fake-useragent==1.5.1 beautifulsoup4
+```
 
 ## 使用

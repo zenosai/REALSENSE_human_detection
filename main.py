@@ -1,15 +1,17 @@
 import cv2
 from Detector import Detector
+from ultralytics import YOLO
+
 
 if __name__ == '__main__':
-    cap = cv2.VideoCapture("test.mp4")
+    cap = cv2.VideoCapture("demo_skeleton.mp4")
     w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
     video_writer = cv2.VideoWriter("test.avi", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
     # Initialize SpeedEstimator
     speed_obj = Detector(
         classid=0,
-        model="yolo11n.pt",
+        model="yolo11n.pt", # or yolo11n.onnx
         show=True,
         tracker="bytetrack.yaml"    # or botsort.yaml
     )

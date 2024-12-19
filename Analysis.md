@@ -54,4 +54,14 @@ https://blog.csdn.net/kobepaul123/article/details/126942095
 
 ### 3. 目标行为区分
 
-使用 MMAction2 内的视频行为识别算法
+思考使用 MMAction2 内的视频行为识别算法，各类算法都过于复杂，虽可识别几百种人类活动，但没有简单的站立、坐下、倒地、行走，考虑自己构造数据集重新训练
+
+FUKinect-Fall 数据集由Kinect V1构建包含动作：行走、弯腰、坐下、蹲下、躺下和跌倒
+参与者：21名，年龄范围19-72岁
+数据量：总计1008个深度视频，记录了20个关节的3D坐标（x, y, z）
+数据结构：6种动作 × 8次重复 × 21名参与者
+视频规格：约4-5秒时长，分辨率320×240，30帧每秒
+
+Aslan M., Akbulut Y., Sengor A., CevdetInce M. "Skeleton based efficient fall detection", J. Faculty Eng. Architecture Gazi Univ., 32 (4) (2017), pp. 1025-1034. (DOI: 10.17341/gazimmfd.369347)
+
+可以由FUKinect-Fall再扩充站立类别，然后通过时序网络进行识别，先识别出关节点，再识别出类别

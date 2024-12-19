@@ -6,8 +6,10 @@
 
 ## 配置
 
-conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia
+conda install pytorch torchvision pytorch-cuda -c pytorch -c nvidia
 
 pip install opencv-python pyrealsense2 deep-sort-realtime ultralytics
+
+pip install ultralytics shapely lap
 
 ## 使用

@@ -13,10 +13,10 @@ conda activate human-detection
 ```
 安装依赖
 ```
-conda install pytorch torchvision pytorch-cuda -c pytorch -c nvidia
+conda install pytorch torchvision==0.13.0 pytorch-cuda -c pytorch -c nvidia
 pip install ultralytics shapely lap onnx>=1.12.0 onnxslim onnxruntime
+pip install pytorchvideo
 pip install opencv-python pyrealsense2
-pip install fake-useragent==1.5.1 beautifulsoup4
 ```
 
 ## 使用

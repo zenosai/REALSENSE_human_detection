@@ -11,6 +11,7 @@ if __name__ == '__main__':
         model="models/yolo11n-seg.pt", # or yolo11n.onnx # yolo11n_openvino_model
         show=True,
         tracker="bytetrack.yaml",    # or botsort.yaml
+        showmask=True,
         # device='xpu'
         # slowfast=video_model,
         # ava_labels=ava_labelnames,

@@ -1,11 +1,12 @@
+import threading
+from collections import deque
 from time import time
 import cv2
 import numpy as np
 import torch
 from ultralytics.solutions.solutions import BaseSolution
 from ultralytics.utils.plotting import Annotator, colors
-# from collections import deque
-# from AvaUtils import ava_inference_transform
+from AvaUtils import ava_inference_transform
 
 
 class Detector(BaseSolution):
@@ -26,7 +27,7 @@ class Detector(BaseSolution):
         display_output: 显示带有标注的输出图像。
     """
 
-    def __init__(self, classid=0, showmask=False, **kwargs):
+    def __init__(self, ava_labels, detect_interval,deque_length=25, slowfast=None, device="cpu", classid=0, showmask=False, **kwargs):
         super().__init__(**kwargs)
 
         self.classid = classid  # 要识别的类别（本课设识别人，默认填 0 即可）
@@ -42,11 +43,13 @@ class Detector(BaseSolution):
         self.track_centers = {}       # { track_id: [pos1, pos2, ...] }
         self.track_avg_position_old = {}  
         self.track_last_time = {}
-        # self.img_stack = deque(maxlen=25)
-        # self.device=device
-        # self.action_labels = {}
-        # self.frame_count = detect_interval//2
-        # self.detect_interval = detect_interval
+        self.img_stack = deque(maxlen=deque_length)
+        self.device=device
+        self.action_labels = {}
+        self.frame_count = detect_interval//2
+        self.detect_interval = detect_interval
+        self.slowfast = slowfast
+        self.ava_labels = ava_labels
 
 
     def find_indices(self, lst, target):
@@ -70,7 +73,7 @@ class Detector(BaseSolution):
         clips = torch.cat(clips).permute(-1, 0, 1, 2)
         return clips
 
-    def slowfast_inference(self,im0):
+    def slowfast_inference(self):
         inputs, inp_boxes, _ = ava_inference_transform(self.get_clips(), self.boxes)
         inp_boxes = torch.cat([torch.zeros(inp_boxes.shape[0], 1), inp_boxes], dim=1)
         if isinstance(inputs, list):
@@ -84,79 +87,111 @@ class Detector(BaseSolution):
         for id, avalabel in zip(self.track_ids, np.argmax(slowfaster_preds, axis=1).tolist()):
             self.action_labels[id] = self.ava_labels[avalabel + 1]
 
+
+    def speed_pos_estimate(self, roi_cloud, box, track_id):
+        label = None
+        center_3d = self.get_3d_center(roi_cloud)
+        if center_3d is not None:
+            # 初始化当前 track_id 的中心队列
+            if track_id not in self.track_centers:
+                self.track_centers[track_id] = []
+                self.track_avg_position_old[track_id] = None
+                self.track_last_time[track_id] = None
+
+            # 历史中心队列中追加新位置
+            self.track_centers[track_id].append(center_3d)
+            if len(self.track_centers[track_id]) > 5:
+                self.track_centers[track_id].pop(0)
+
+            # 收集到 5 帧中心后进行速度计算
+            if len(self.track_centers[track_id]) == 5:
+                new_avg = np.mean(self.track_centers[track_id], axis=0)
+                current_time = cv2.getTickCount() / cv2.getTickFrequency()
+                old_avg = self.track_avg_position_old[track_id]
+                last_time = self.track_last_time[track_id]
+                if old_avg is not None and last_time is not None:
+                    dt = current_time - last_time
+                    delta_pos = new_avg - old_avg
+                    speed_3d = delta_pos / dt
+                    speed_mag = np.linalg.norm(speed_3d)
+                    label = f"ID:{track_id}, Pos:[{new_avg[0]:.2f},{new_avg[1]:.2f},{new_avg[2]:.2f}], Speed:{speed_mag:.2f}m/s"
+                self.track_avg_position_old[track_id] = new_avg
+                self.track_last_time[track_id] = current_time
+        return label
+
+
     def estimate(self, rgb, depth, fx, fy, cx, cy):
-        """生成点云并识别前景，再计算人体运动速度。
-        返回: (results, annotated_frame)
-        """
-        # 原先的模型推理
-        # results = self.model(rgb, conf=0.25)
         self.annotator = Annotator(rgb, line_width=self.line_width)
 
-        # 在这里直接生成点云等逻辑
         cloud = self.create_point_cloud_from_depth_image(depth, fx, fy, cx, cy)
         if not hasattr(self, 'last_center_3d'):
             self.last_center_3d = None
         if not hasattr(self, 'last_time'):
             self.last_time = None
-        
+
+        # yolo检测，并记录历史RGB信息，供给action检测
         self.extract_tracks(rgb)
+        self.img_stack.append(rgb) # 入栈
+        self.frame_count += 1
+
+        # 检测类别过滤
         indices = self.find_indices(self.clss, self.classid)
-        self.masks = self.tracks[0].masks[indices]
-        self.boxes = [self.boxes[i] for i in indices]
+        if len(indices) == 0:   # 没有检测到clss类别
+            self.display_output(rgb)
+            return rgb
+
+        self.masks = [mask for mask in self.tracks[0].masks[indices].data]
+        self.roi_clouds = [cloud[mask.cpu().numpy().astype(bool).flatten()] for mask in self.tracks[0].masks[indices].data]
+        self.boxes = self.boxes[indices]
         self.track_ids = [self.track_ids[i] for i in indices]
         self.clss = [self.clss[i] for i in indices]
 
-        # 对每个人体的掩码做前景提取并计算速度
-        if self.masks is not None:
-            valid_idx = []
-            for idx, (box, track_id) in enumerate(zip(self.boxes, self.track_ids)):
-                mask2d = self.masks.data[idx].cpu().numpy().astype(bool)
-                roi_cloud = cloud[mask2d.flatten()]
-                if self.is_real_person_by_cloud(roi_cloud):
-                    self.store_tracking_history(track_id, box)
-                    valid_idx.append(idx)
-                    center_3d = self.get_3d_center(roi_cloud)
-                    if center_3d is not None:
-                        # 初始化当前 track_id 的中心队列
-                        if track_id not in self.track_centers:
-                            self.track_centers[track_id] = []
-                            self.track_avg_position_old[track_id] = None
-                            self.track_last_time[track_id] = None
-
-                        # 历史中心队列中追加新位置
-                        self.track_centers[track_id].append(center_3d)
-                        if len(self.track_centers[track_id]) > 5:
-                            self.track_centers[track_id].pop(0)
-
-                        # 收集到 5 帧中心后进行速度计算
-                        if len(self.track_centers[track_id]) == 5:
-                            new_avg = np.mean(self.track_centers[track_id], axis=0)
-                            current_time = cv2.getTickCount() / cv2.getTickFrequency()
-                            old_avg = self.track_avg_position_old[track_id]
-                            last_time = self.track_last_time[track_id]
-                            if old_avg is not None and last_time is not None:
-                                dt = current_time - last_time
-                                delta_pos = new_avg - old_avg
-                                speed_3d = delta_pos / dt 
-                                speed_mag = np.linalg.norm(speed_3d)
-                                self.annotator.box_label(
-                                    box,
-                                    label=f"ID:{track_id}, Pos:[{new_avg[0]:.2f},{new_avg[1]:.2f},{new_avg[2]:.2f}], Speed:{speed_mag:.2f}m/s",
-                                    color=colors(idx, True)
-                                )
-                            self.track_avg_position_old[track_id] = new_avg
-                            self.track_last_time[track_id] = current_time
-                    self.annotator.draw_centroid_and_tracks(
-                        self.track_line, color=colors(int(track_id), True), track_thickness=self.line_width)
-            if self.showmask and len(valid_idx) > 0:
-                self.annotator.masks(torch.stack([self.masks[i].data for i in valid_idx]).to('xpu').squeeze(dim=1),
-                                     colors=[colors(idx, True) for idx in valid_idx],
-                                     im_gpu=torch.tensor(rgb, device='xpu').permute(2,0,1), alpha=0.1)
-            
+        # 活体检测
+        if self.real_person_detect() == []:
             self.display_output(rgb)
+            return rgb
 
-        annotated_frame = self.annotator.result()
-        return annotated_frame
+        # action检测
+        if self.frame_count % self.detect_interval == 0:
+            if self.slowfast != None:
+                self.slowfast_inference()
+            self.frame_count = 0
+
+        # 绘制label
+        for mask, roi_cloud, box, track_id, cls in zip(self.masks, self.roi_clouds, self.boxes, self.track_ids, self.clss):
+            self.store_tracking_history(track_id, box)  # 存储物体的轨迹历史
+            # 速度及位置检测
+            label = self.speed_pos_estimate(roi_cloud, box, track_id)
+            if label is None:
+                label = self.names[int(cls)]
+
+            # 如果该 track_id 还没有记录时间戳或位置，则初始化
+            if track_id not in self.trk_pt:
+                self.trk_pt[track_id] = 0
+            if track_id not in self.trk_pp:
+                self.trk_pp[track_id] = self.track_line[-1]
+
+            if track_id in self.action_labels:
+                label += " Action:"+self.action_labels[track_id]
+
+            self.annotator.box_label(box, label=label, color=colors(track_id, True))  # 绘制边界框
+
+            # 绘制物体的轨迹
+            self.annotator.draw_centroid_and_tracks(
+                self.track_line, color=colors(int(track_id), True), track_thickness=self.line_width)
+
+            self.trk_pt[track_id] = time()
+            self.trk_pp[track_id] = self.track_line[-1]
+
+        # 绘制mask
+        if self.showmask:
+            self.annotator.masks(torch.stack(self.masks).to(self.device).squeeze(dim=1),
+                                 colors=[colors(idx, True) for idx in self.track_ids],
+                                 im_gpu=torch.tensor(rgb, device=self.device).permute(2, 0, 1), alpha=0.1)
+
+        self.display_output(rgb)  # 使用基类方法显示输出图像
+        return rgb
+
 
     def create_point_cloud_from_depth_image(self, depth, fx, fy, cx, cy, scale=1000.0):
         h, w = depth.shape
@@ -167,6 +202,19 @@ class Detector(BaseSolution):
         x = (xmap - cx) * z / fx
         y = (ymap - cy) * z / fy
         return np.stack([x, y, z], axis=-1).reshape(-1, 3)
+
+    def real_person_detect(self):
+        indices = []
+        for idx, roi_cloud in enumerate(self.roi_clouds):
+            if self.is_real_person_by_cloud(roi_cloud):
+                indices.append(idx)
+
+        self.masks = [self.masks[i] for i in indices]
+        self.roi_clouds = [self.roi_clouds[i] for i in indices]
+        self.boxes = self.boxes[indices]
+        self.track_ids = [self.track_ids[i] for i in indices]
+        self.clss = [self.clss[i] for i in indices]
+        return indices
 
     def is_real_person_by_cloud(self, roi_cloud, std_threshold=0.2):
         if len(roi_cloud) == 0:

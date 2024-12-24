@@ -14,9 +14,10 @@ conda activate human-detection
 安装依赖
 ```
 conda install pytorch torchvision==0.13.0 pytorch-cuda -c pytorch -c nvidia
-pip install ultralytics shapely lap onnx>=1.12.0 onnxslim onnxruntime
-pip install pytorchvideo
-pip install opencv-python pyrealsense2
+pip install ultralytics shapely lap onnx>=1.12.0 onnxslim onnxruntime -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install pytorchvideo -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install opencv-python pyrealsense2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ## 使用
+运行main.py

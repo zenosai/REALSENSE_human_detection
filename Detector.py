@@ -7,6 +7,7 @@ import torch
 from ultralytics.solutions.solutions import BaseSolution
 from ultralytics.utils.plotting import Annotator, colors
 from AvaUtils import ava_inference_transform
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 class Detector(BaseSolution):
@@ -27,7 +28,8 @@ class Detector(BaseSolution):
         display_output: 显示带有标注的输出图像。
     """
 
-    def __init__(self, ava_labels, detect_interval,deque_length=25, slowfast=None, device="cpu", classid=0, showmask=False, **kwargs):
+    def __init__(self, ava_labels, detect_interval,deque_length=25, slowfast=None, is_parallel=False,
+                 device="cpu", classid=0, showmask=False, **kwargs):
         super().__init__(**kwargs)
 
         self.classid = classid  # 要识别的类别（本课设识别人，默认填 0 即可）
@@ -50,6 +52,9 @@ class Detector(BaseSolution):
         self.detect_interval = detect_interval
         self.slowfast = slowfast
         self.ava_labels = ava_labels
+        self.slowfast_flag = 0
+        self.normal_flag = 0
+        self.is_parallel = is_parallel
 
 
     def find_indices(self, lst, target):
@@ -73,19 +78,23 @@ class Detector(BaseSolution):
         clips = torch.cat(clips).permute(-1, 0, 1, 2)
         return clips
 
-    def slowfast_inference(self):
-        inputs, inp_boxes, _ = ava_inference_transform(self.get_clips(), self.boxes)
-        inp_boxes = torch.cat([torch.zeros(inp_boxes.shape[0], 1), inp_boxes], dim=1)
-        if isinstance(inputs, list):
-            inputs = [inp.unsqueeze(0).to(self.device) for inp in inputs]
-        else:
-            inputs = inputs.unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            slowfaster_preds = self.slowfast(inputs, inp_boxes.to(self.device))
-            slowfaster_preds = slowfaster_preds.cpu()
+    def slowfast_inference(self, frame_count, track_ids, boxes, get_clips):
+        self.slowfast_flag = 1
+        if frame_count % self.detect_interval == 0:
+            inputs, inp_boxes, _ = ava_inference_transform(get_clips, boxes)
+            inp_boxes = torch.cat([torch.zeros(inp_boxes.shape[0], 1), inp_boxes], dim=1)
+            if isinstance(inputs, list):
+                inputs = [inp.unsqueeze(0).to(self.device) for inp in inputs]
+            else:
+                inputs = inputs.unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                slowfaster_preds = self.slowfast(inputs, inp_boxes.to(self.device))
+                slowfaster_preds = slowfaster_preds.cpu()
 
-        for id, avalabel in zip(self.track_ids, np.argmax(slowfaster_preds, axis=1).tolist()):
-            self.action_labels[id] = self.ava_labels[avalabel + 1]
+            for id, avalabel in zip(track_ids, np.argmax(slowfaster_preds, axis=1).tolist()):
+                self.action_labels[id] = self.ava_labels[avalabel + 1]
+        self.frame_count = 0
+        self.slowfast_flag = 0
 
 
     def speed_pos_estimate(self, roi_cloud, box, track_id):
@@ -121,6 +130,7 @@ class Detector(BaseSolution):
 
 
     def estimate(self, rgb, depth, fx, fy, cx, cy):
+        self.normal_flag = 1
         self.annotator = Annotator(rgb, line_width=self.line_width)
 
         cloud = self.create_point_cloud_from_depth_image(depth, fx, fy, cx, cy)
@@ -151,11 +161,8 @@ class Detector(BaseSolution):
             self.display_output(rgb)
             return rgb
 
-        # action检测
-        if self.frame_count % self.detect_interval == 0:
-            if self.slowfast != None:
-                self.slowfast_inference()
-            self.frame_count = 0
+        if not self.is_parallel and self.frame_count % self.detect_interval == 0:
+            self.slowfast_inference(self.frame_count, self.track_ids, self.boxes, self.get_clips())
 
         # 绘制label
         for mask, roi_cloud, box, track_id, cls in zip(self.masks, self.roi_clouds, self.boxes, self.track_ids, self.clss):
@@ -190,6 +197,7 @@ class Detector(BaseSolution):
                                  im_gpu=torch.tensor(rgb, device=self.device).permute(2, 0, 1), alpha=0.1)
 
         self.display_output(rgb)  # 使用基类方法显示输出图像
+        self.normal_flag = 0
         return rgb
 
 
@@ -226,3 +234,29 @@ class Detector(BaseSolution):
         if len(roi_cloud) == 0:
             return None
         return np.mean(roi_cloud, axis=0)
+
+    def parallel_run(self, pipeline, align, fx, fy, cx, cy):
+        normal_session = None
+        slowfast_session = None
+        with ProcessPoolExecutor() as executor:
+            while True:
+                frames = pipeline.wait_for_frames()
+                # RGB-D 对齐
+                aligned_frames = align.process(frames)
+                aligned_color_frame = aligned_frames.get_color_frame()
+                aligned_depth_frame = aligned_frames.get_depth_frame()
+                if not aligned_depth_frame or not aligned_color_frame:
+                    raise Exception("[info] No D455 data.")
+
+                rgb = np.asanyarray(aligned_color_frame.get_data())
+                d = np.asanyarray(aligned_depth_frame.get_data())
+
+                if (slowfast_session is None or slowfast_session.done()) and self.frame_count % self.detect_interval == 0:
+                    slowfast_session = executor.submit(self.slowfast_inference, self.frame_count, self.track_ids, self.boxes,
+                                    self.get_clips())
+
+                if normal_session is None or normal_session.done():
+                    normal_session = executor.submit(self.estimate, rgb, d, fx, fy, cx, cy)
+
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    return

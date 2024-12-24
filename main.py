@@ -11,7 +11,11 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     video_model = slowfast_r50_detection(True).eval().to(device)
+    # torch.onnx.export(video_model, dummy_input, "slowfast.onnx", verbose=True, input_names=["input"],
+    #                   output_names=["output"])
+
     ava_labelnames, _ = AvaLabeledVideoFramePaths.read_label_map("configs/ava_action_list.pbtxt")
+    is_parallel = False # 并行化目前无法正常运行
 
     speed_obj = Detector(
         classid=0,
@@ -23,8 +27,9 @@ if __name__ == '__main__':
         device=device,
         slowfast=video_model,   # slowfast模型 or None
         ava_labels=ava_labelnames,
-        detect_interval=25,  # 设定slowfast触发频率（/fps）
-        deque_length=1  # slowfast的输入帧队列长度
+        detect_interval=50,  # 设定slowfast触发频率（/fps）
+        deque_length=1,  # slowfast的输入帧队列长度
+        is_parallel=is_parallel,
     )
 
     pipeline = rs.pipeline()
@@ -43,20 +48,23 @@ if __name__ == '__main__':
     fx, fy, cx, cy = intrinsics.fx, intrinsics.fy, intrinsics.ppx, intrinsics.ppy
     print("相机内参：",f"fx: {fx}, fy: {fy}, cx: {cx}, cy: {cy}")
 
-    while True:
-        frames = pipeline.wait_for_frames()
-        # RGB-D 对齐
-        aligned_frames = align.process(frames)
-        aligned_color_frame = aligned_frames.get_color_frame()
-        aligned_depth_frame = aligned_frames.get_depth_frame()
-        if not aligned_depth_frame or not aligned_color_frame:
-            raise Exception("[info] No D455 data.")
+    if is_parallel:
+        speed_obj.parallel_run(pipeline, align, fx, fy, cx, cy)
+    else:
+        while True:
+            frames = pipeline.wait_for_frames()
+            # RGB-D 对齐
+            aligned_frames = align.process(frames)
+            aligned_color_frame = aligned_frames.get_color_frame()
+            aligned_depth_frame = aligned_frames.get_depth_frame()
+            if not aligned_depth_frame or not aligned_color_frame:
+                raise Exception("[info] No D455 data.")
 
-        rgb = np.asanyarray(aligned_color_frame.get_data())
-        d = np.asanyarray(aligned_depth_frame.get_data())
+            rgb = np.asanyarray(aligned_color_frame.get_data())
+            d = np.asanyarray(aligned_depth_frame.get_data())
 
-        # 在 Detector 的 estimate 中生成点云并完成速度计算
-        annotated_frame = speed_obj.estimate(rgb, d, fx, fy, cx, cy)
+            # 在 Detector 的 estimate 中生成点云并完成速度计算
+            annotated_frame = speed_obj.estimate(rgb, d, fx, fy, cx, cy)
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break

@@ -7,7 +7,7 @@ import torch
 from ultralytics.solutions.solutions import BaseSolution
 from ultralytics.utils.plotting import Annotator, colors
 from AvaUtils import ava_inference_transform
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
 
 
 class Detector(BaseSolution):
@@ -55,6 +55,8 @@ class Detector(BaseSolution):
         self.slowfast_flag = 0
         self.normal_flag = 0
         self.is_parallel = is_parallel
+        self.slowfast_session = None
+        self.normal_session = None
 
 
     def find_indices(self, lst, target):
@@ -93,8 +95,8 @@ class Detector(BaseSolution):
 
             for id, avalabel in zip(track_ids, np.argmax(slowfaster_preds, axis=1).tolist()):
                 self.action_labels[id] = self.ava_labels[avalabel + 1]
-        self.frame_count = 0
         self.slowfast_flag = 0
+        return self.action_labels
 
 
     def speed_pos_estimate(self, roi_cloud, box, track_id):
@@ -128,8 +130,32 @@ class Detector(BaseSolution):
                 self.track_last_time[track_id] = current_time
         return label
 
+    def extract_tracks(self, im0):
+        """
+        Applies object tracking and extracts tracks from an input image or frame.
 
-    def estimate(self, rgb, depth, fx, fy, cx, cy):
+        Args:
+            im0 (ndarray): The input image or frame.
+
+        Examples:
+            >>> solution = BaseSolution()
+            >>> frame = cv2.imread("path/to/image.jpg")
+            >>> solution.extract_tracks(frame)
+        """
+        self.tracks = self.model.track(source=im0, persist=True, classes=self.CFG["classes"], **self.track_add_args)
+
+        # Extract tracks for OBB or object detection
+        self.track_data = self.tracks[0].obb or self.tracks[0].boxes
+
+        if self.track_data and self.track_data.id is not None:
+            self.boxes = self.track_data.xyxy.cpu()
+            self.clss = self.track_data.cls.cpu().tolist()
+            self.track_ids = self.track_data.id.int().cpu().tolist()
+        else:
+            self.boxes, self.clss, self.track_ids = [], [], []
+        return self.tracks, self.track_data, self.boxes, self.clss, self.track_ids
+
+    def estimate(self, rgb, depth, fx, fy, cx, cy, executor=None):
         self.normal_flag = 1
         self.annotator = Annotator(rgb, line_width=self.line_width)
 
@@ -140,7 +166,14 @@ class Detector(BaseSolution):
             self.last_time = None
 
         # yolo检测，并记录历史RGB信息，供给action检测
-        self.extract_tracks(rgb)
+        if self.is_parallel:
+            if self.normal_session is None or self.normal_session.done():
+                self.normal_session = executor.submit(self.extract_tracks, rgb)
+                while not self.normal_session.done(): pass
+                self.tracks, self.track_data, self.boxes, self.clss, self.track_ids = self.normal_session.result()
+        else:
+            self.extract_tracks(rgb)
+
         self.img_stack.append(rgb) # 入栈
         self.frame_count += 1
 
@@ -161,8 +194,21 @@ class Detector(BaseSolution):
             self.display_output(rgb)
             return rgb
 
-        if not self.is_parallel and self.frame_count % self.detect_interval == 0:
-            self.slowfast_inference(self.frame_count, self.track_ids, self.boxes, self.get_clips())
+        # 行为检测
+        if self.is_parallel:
+            if self.slowfast_session is not None and self.slowfast_session.done():
+                self.action_labels = self.slowfast_session.result()
+                print(self.action_labels)
+            if (self.slowfast_session is None or self.slowfast_session.done()) and self.frame_count % self.detect_interval == 0:
+                self.frame_count=0
+                self.slowfast_session = executor.submit(self.slowfast_inference, self.frame_count, self.track_ids, self.boxes,
+                                self.get_clips())
+        else:
+            if self.frame_count % self.detect_interval == 0:
+                self.frame_count=0
+                start_time = time()
+                self.slowfast_inference(self.frame_count, self.track_ids, self.boxes, self.get_clips())
+                print(f"行为检测用时: {(time() - start_time)*1000:.1f} ms")
 
         # 绘制label
         for mask, roi_cloud, box, track_id, cls in zip(self.masks, self.roi_clouds, self.boxes, self.track_ids, self.clss):
@@ -236,9 +282,9 @@ class Detector(BaseSolution):
         return np.mean(roi_cloud, axis=0)
 
     def parallel_run(self, pipeline, align, fx, fy, cx, cy):
-        normal_session = None
-        slowfast_session = None
-        with ProcessPoolExecutor() as executor:
+        # normal_session = None
+        # slowfast_session = None
+        with ThreadPoolExecutor() as executor:
             while True:
                 frames = pipeline.wait_for_frames()
                 # RGB-D 对齐
@@ -251,12 +297,14 @@ class Detector(BaseSolution):
                 rgb = np.asanyarray(aligned_color_frame.get_data())
                 d = np.asanyarray(aligned_depth_frame.get_data())
 
-                if (slowfast_session is None or slowfast_session.done()) and self.frame_count % self.detect_interval == 0:
-                    slowfast_session = executor.submit(self.slowfast_inference, self.frame_count, self.track_ids, self.boxes,
-                                    self.get_clips())
+                self.estimate(rgb, d, fx, fy, cx, cy, executor)
 
-                if normal_session is None or normal_session.done():
-                    normal_session = executor.submit(self.estimate, rgb, d, fx, fy, cx, cy)
+                # if (slowfast_session is None or slowfast_session.done()) and self.frame_count % self.detect_interval == 0:
+                #     slowfast_session = executor.submit(self.slowfast_inference, self.frame_count, self.track_ids, self.boxes,
+                #                     self.get_clips())
+                #
+                # if normal_session is None or normal_session.done():
+                #     normal_session = executor.submit(self.estimate, rgb, d, fx, fy, cx, cy)
 
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     return

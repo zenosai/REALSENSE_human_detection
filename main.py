@@ -11,8 +11,6 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     video_model = slowfast_r50_detection(True).eval().to(device)
-    # torch.onnx.export(video_model, dummy_input, "slowfast.onnx", verbose=True, input_names=["input"],
-    #                   output_names=["output"])
 
     ava_labelnames, _ = AvaLabeledVideoFramePaths.read_label_map("configs/ava_action_list.pbtxt")
     is_parallel = False # 并行化目前无法正常运行

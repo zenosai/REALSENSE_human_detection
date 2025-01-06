@@ -6,6 +6,7 @@ from Detector import Detector
 import numpy as np
 import pyrealsense2 as rs
 import os
+import Pyro4
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 if __name__ == '__main__':
@@ -13,7 +14,11 @@ if __name__ == '__main__':
     video_model = slowfast_r50_detection(True).eval().to(device)
 
     ava_labelnames, _ = AvaLabeledVideoFramePaths.read_label_map("configs/ava_action_list.pbtxt")
-    is_parallel = False # 并行化目前无法正常运行
+    is_parallel = True
+    pyro_model = None
+    if is_parallel:
+        uri = "PYRO:obj_d3f0f26745904b85af2cac6fd1ab4102@localhost:4590"
+        pyro_model = Pyro4.Proxy(uri)
 
     speed_obj = Detector(
         classid=0,
@@ -28,6 +33,7 @@ if __name__ == '__main__':
         detect_interval=50,  # 设定slowfast触发频率（/fps）
         deque_length=1,  # slowfast的输入帧队列长度
         is_parallel=is_parallel,
+        pyro_model=pyro_model
     )
 
     pipeline = rs.pipeline()

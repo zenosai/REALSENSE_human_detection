@@ -1,4 +1,3 @@
-import threading
 from collections import deque
 from time import time
 import cv2
@@ -28,7 +27,7 @@ class Detector(BaseSolution):
         display_output: 显示带有标注的输出图像。
     """
 
-    def __init__(self, ava_labels, detect_interval,deque_length=25, slowfast=None, is_parallel=False,
+    def __init__(self, ava_labels, detect_interval,pyro_model=None,deque_length=25, slowfast=None, is_parallel=False,
                  device="cpu", classid=0, showmask=False, **kwargs):
         super().__init__(**kwargs)
 
@@ -57,6 +56,7 @@ class Detector(BaseSolution):
         self.is_parallel = is_parallel
         self.slowfast_session = None
         self.normal_session = None
+        self.pyro_model = pyro_model
 
 
     def find_indices(self, lst, target):
@@ -81,22 +81,51 @@ class Detector(BaseSolution):
         return clips
 
     def slowfast_inference(self, frame_count, track_ids, boxes, get_clips):
-        self.slowfast_flag = 1
-        if frame_count % self.detect_interval == 0:
-            inputs, inp_boxes, _ = ava_inference_transform(get_clips, boxes)
-            inp_boxes = torch.cat([torch.zeros(inp_boxes.shape[0], 1), inp_boxes], dim=1)
-            if isinstance(inputs, list):
-                inputs = [inp.unsqueeze(0).to(self.device) for inp in inputs]
-            else:
-                inputs = inputs.unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                slowfaster_preds = self.slowfast(inputs, inp_boxes.to(self.device))
-                slowfaster_preds = slowfaster_preds.cpu()
+        # pyro4版本:
+        boxes = np.array(boxes).tolist()
+        get_clips = np.array(get_clips).tolist()
+        return self.pyro_model.slowfast_inference(frame_count, track_ids, boxes, get_clips)
 
-            for id, avalabel in zip(track_ids, np.argmax(slowfaster_preds, axis=1).tolist()):
-                self.action_labels[id] = self.ava_labels[avalabel + 1]
-        self.slowfast_flag = 0
-        return self.action_labels
+        # 线程管理版本:
+        # self.slowfast_flag = 1
+        # if frame_count % self.detect_interval == 0:
+        #     inputs, inp_boxes, _ = ava_inference_transform(get_clips, boxes)
+        #     inp_boxes = torch.cat([torch.zeros(inp_boxes.shape[0], 1), inp_boxes], dim=1)
+        #     if isinstance(inputs, list):
+        #         inputs = [inp.unsqueeze(0).to(self.device) for inp in inputs]
+        #     else:
+        #         inputs = inputs.unsqueeze(0).to(self.device)
+        #     with torch.no_grad():
+        #         slowfaster_preds = self.slowfast(inputs, inp_boxes.to(self.device))
+        #         slowfaster_preds = slowfaster_preds.cpu()
+        #
+        #     for id, avalabel in zip(track_ids, np.argmax(slowfaster_preds, axis=1).tolist()):
+        #         self.action_labels[id] = self.ava_labels[avalabel + 1]
+        # self.slowfast_flag = 0
+
+        # fastapi调用版本:
+        # headers = {
+        #     "Content-Type": "application/json"
+        # }
+        # # FastAPI 服务的 URL
+        # url = "http://127.0.0.1:8000/predict/"
+        #
+        # data = {
+        #     "frame_count": frame_count,
+        #     "track_ids": track_ids,
+        #     "boxes": boxes.cpu().numpy().tolist(),
+        #     "get_clips": get_clips.numpy().tolist()
+        # }
+        #
+        # # 发送 POST 请求到 FastAPI 服务器
+        # response = requests.post(url, data=data, headers=headers)
+        # # 输出响应内容
+        # if response.status_code == 200:
+        #     # 如果请求成功，解析 JSON 响应
+        #     result = response.json()
+        #     self.action_labels = result['prediction']
+        #     print(f"Prediction: {result['prediction']}")
+        # return self.action_labels
 
 
     def speed_pos_estimate(self, roi_cloud, box, track_id):
@@ -166,13 +195,15 @@ class Detector(BaseSolution):
             self.last_time = None
 
         # yolo检测，并记录历史RGB信息，供给action检测
-        if self.is_parallel:
-            if self.normal_session is None or self.normal_session.done():
-                self.normal_session = executor.submit(self.extract_tracks, rgb)
-                while not self.normal_session.done(): pass
-                self.tracks, self.track_data, self.boxes, self.clss, self.track_ids = self.normal_session.result()
-        else:
-            self.extract_tracks(rgb)
+        # if self.is_parallel:
+        #     if self.normal_session is None or self.normal_session.done():
+        #         self.normal_session = executor.submit(self.extract_tracks, rgb)
+        #         while not self.normal_session.done(): pass
+        #         self.tracks, self.track_data, self.boxes, self.clss, self.track_ids = self.normal_session.result()
+        # else:
+        #     self.extract_tracks(rgb)
+
+        self.extract_tracks(rgb)
 
         self.img_stack.append(rgb) # 入栈
         self.frame_count += 1
@@ -198,7 +229,7 @@ class Detector(BaseSolution):
         if self.is_parallel:
             if self.slowfast_session is not None and self.slowfast_session.done():
                 self.action_labels = self.slowfast_session.result()
-                print(self.action_labels)
+                # print(self.action_labels)
             if (self.slowfast_session is None or self.slowfast_session.done()) and self.frame_count % self.detect_interval == 0:
                 self.frame_count=0
                 self.slowfast_session = executor.submit(self.slowfast_inference, self.frame_count, self.track_ids, self.boxes,

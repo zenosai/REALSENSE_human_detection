@@ -1,6 +1,6 @@
 ## 目标
 
-使用 RealsenseD435i 相机, 综合利用点云、图像信息，检测人体目标（要求能够区分照片和真人)
+使用 RealsenseD455 相机, 综合利用点云、图像信息，检测人体目标（要求能够区分照片和真人)
 
 在检测到人形目标后，计算距离、移动速度等指标。 
 
@@ -10,7 +10,7 @@
 
 ## 分析
 
-D435i 可以提供 RGB 图像和深度图像
+D455 可以提供 RGB 图像和深度图像
 
 https://huzhenyou.github.io/blog/2023/08/PoseEstimation-TAD
 https://blog.csdn.net/kobepaul123/article/details/126942095

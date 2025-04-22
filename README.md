@@ -8,13 +8,13 @@
 
 创建conda环境
 ```
-conda create -n human-detection python=3.8
+conda create -n human-detection python=3.10
 conda activate human-detection
 ```
 安装依赖
 ```
 conda install pytorch torchvision==0.13.0 pytorch-cuda -c pytorch -c nvidia
-pip install ultralytics shapely lap onnx>=1.12.0 onnxslim onnxruntime -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install ultralytics==8.3.59 shapely lap onnx>=1.12.0 onnxslim onnxruntime -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install pytorchvideo -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install opencv-python pyrealsense2 pyro4 -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
